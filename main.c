@@ -131,14 +131,21 @@ static int sock_write(void *ctx, const unsigned char *buf, size_t len) {
         if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
+        time_t elapsed = time(NULL) - start;
+        if (elapsed >= NET_TIMEOUT_SEC) {
+            net_timeout_hit = 1;
+            return -1;
+        }
+        int wait_sec = (int)(NET_TIMEOUT_SEC - elapsed);
+        if (wait_sec > 1) wait_sec = 1;
+        if (wait_sec < 1) wait_sec = 1;
         fd_set wfds;
         struct timeval tv;
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
-        tv.tv_sec = 1;
+        tv.tv_sec = wait_sec;
         tv.tv_usec = 0;
-        if (select(fd + 1, NULL, &wfds, NULL, &tv) <= 0
-            && time(NULL) - start >= NET_TIMEOUT_SEC) {
+        if (select(fd + 1, NULL, &wfds, NULL, &tv) < 0) {
             net_timeout_hit = 1;
             return -1;
         }
@@ -337,14 +344,21 @@ int sec_send(SecureConnection *sec, const void *buf, size_t len) {
         if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
+        time_t elapsed = time(NULL) - start;
+        if (elapsed >= NET_TIMEOUT_SEC) {
+            net_timeout_hit = 1;
+            return -1;
+        }
+        int wait_sec = (int)(NET_TIMEOUT_SEC - elapsed);
+        if (wait_sec > 1) wait_sec = 1;
+        if (wait_sec < 1) wait_sec = 1;
         fd_set wfds;
         struct timeval tv;
         FD_ZERO(&wfds);
         FD_SET(sec->sock, &wfds);
-        tv.tv_sec = 1;
+        tv.tv_sec = wait_sec;
         tv.tv_usec = 0;
-        if (select(sec->sock + 1, NULL, &wfds, NULL, &tv) <= 0
-            && time(NULL) - start >= NET_TIMEOUT_SEC) {
+        if (select(sec->sock + 1, NULL, &wfds, NULL, &tv) < 0) {
             net_timeout_hit = 1;
             return -1;
         }
