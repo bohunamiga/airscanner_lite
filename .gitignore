@@ -1,0 +1,8 @@
+# Built binary
+airscannerlite
+
+# macOS
+.DS_Store
+
+# Editor project file (user-specific absolute paths)
+airscanner lite.geany
