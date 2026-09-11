@@ -37,6 +37,7 @@
 struct Library *MUIMasterBase = NULL;
 struct Library *SocketBase = NULL;
 Object *app, *window, *str_ip, *txt_status, *cyc_dpi, *btn_conn, *btn_scan;
+static char scanner_url_effective[160] = {0};
 
 #define ID_QUIT     1
 #define ID_CONNECT  2
@@ -325,16 +326,53 @@ int sec_send(SecureConnection *sec, const void *buf, size_t len) {
         }
         return (int)len;
     }
-    return send(sec->sock, buf, len, 0);
+    size_t sent = 0;
+    time_t start = time(NULL);
+    while (sent < len) {
+        int r = send(sec->sock, (const char *)buf + sent, len - sent, 0);
+        if (r > 0) {
+            sent += (size_t)r;
+            continue;
+        }
+        if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            return -1;
+        }
+        fd_set wfds;
+        struct timeval tv;
+        FD_ZERO(&wfds);
+        FD_SET(sec->sock, &wfds);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        if (select(sec->sock + 1, NULL, &wfds, NULL, &tv) <= 0
+            && time(NULL) - start >= NET_TIMEOUT_SEC) {
+            net_timeout_hit = 1;
+            return -1;
+        }
+    }
+    return (int)sent;
 }
 
 int sec_recv(SecureConnection *sec, void *buf, size_t len) {
     if (sec->use_ssl) {
         int r = br_sslio_read(&sec->ioc, buf, len);
-        return (r <= 0) ? 0 : r;
+        if (r > 0) return r;
+        if (r == 0) return 0;
+        return -1;
     }
-    int r = recv(sec->sock, buf, len, 0);
-    return (r <= 0) ? 0 : r;
+    time_t start = time(NULL);
+    for (;;) {
+        int r = recv(sec->sock, buf, len, 0);
+        if (r > 0) return r;
+        if (r == 0) return 0;
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            return -1;
+        }
+        if (time(NULL) - start >= NET_TIMEOUT_SEC) {
+            net_timeout_hit = 1;
+            return -1;
+        }
+        Delay(10);
+    }
 }
 
 void sec_close(SecureConnection *sec) {
@@ -470,6 +508,12 @@ static int fetch_eSCL_capabilities(const char *url_str, char *buf, size_t size) 
         if (total >= (int)size - 1) break;
     }
     sec_close(sec);
+    if (n < 0) {
+        printf("[airScanner] Capabilities fetch: read error, read_timeout=%s\n",
+               net_timeout_hit ? "YES" : "NO");
+        if (use_ssl) probe_plaintext_http(host, port, 1);
+        return -1;
+    }
     if (total == 0) {
         printf("[airScanner] Capabilities fetch: 0 bytes received, "
                "read_timeout=%s\n", net_timeout_hit ? "YES" : "NO");
@@ -484,18 +528,14 @@ void CheckScannerCapabilities() {
     const char *url_str = (const char *)ip_ptr;
 
     if (!url_str || strlen(url_str) == 0) return;
+    scanner_url_effective[0] = '\0';
 
     set(txt_status, MUIA_Text_Contents, (IPTR)"Searching for scanner (HTTP/HTTPS)...");
 
     char buf[65536] = {0}; 
     int total = fetch_eSCL_capabilities(url_str, buf, sizeof(buf));
 
-    if (total < 0) {
-        set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Cannot connect to scanner.");
-        return;
-    }
-
-    if (total == 0 && strncasecmp(url_str, "https", 5) == 0) {
+    if ((total <= 0) && strncasecmp(url_str, "https", 5) == 0) {
         char host[128]; int port, use_ssl;
         parse_scanner_url(url_str, host, sizeof(host), &port, &use_ssl);
         char fallback[160];
@@ -505,8 +545,16 @@ void CheckScannerCapabilities() {
         snprintf(fallback, sizeof(fallback), "http://%s:%d", host, port);
         set(txt_status, MUIA_Text_Contents, (IPTR)"TLS handshake failed, retrying plain HTTP...");
         total = fetch_eSCL_capabilities(fallback, buf, sizeof(buf));
-        if (total > 0)
+        if (total > 0) {
+            strncpy(scanner_url_effective, fallback, sizeof(scanner_url_effective) - 1);
+            scanner_url_effective[sizeof(scanner_url_effective) - 1] = '\0';
             set(txt_status, MUIA_Text_Contents, (IPTR)"Connected via plain HTTP on TLS port (TLS failed).");
+        }
+    }
+
+    if (total < 0) {
+        set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Cannot connect to scanner.");
+        return;
     }
 
     printf("\n[airScanner] Raw response length: %d bytes\n", total);
@@ -524,9 +572,15 @@ void CheckScannerCapabilities() {
         }
     }
 
+    if (total > 0 && scanner_url_effective[0] == '\0') {
+        strncpy(scanner_url_effective, url_str, sizeof(scanner_url_effective) - 1);
+        scanner_url_effective[sizeof(scanner_url_effective) - 1] = '\0';
+    }
+
     char model_name[128] = {0};
     char host[128]; int port, use_ssl = 0;
-    parse_scanner_url(url_str, host, sizeof(host), &port, &use_ssl);
+    parse_scanner_url(scanner_url_effective[0] ? scanner_url_effective : url_str,
+                      host, sizeof(host), &port, &use_ssl);
     if (get_xml_tag_value(buf, "MakeAndModel", model_name, sizeof(model_name)) ||
         get_xml_tag_value(buf, "Model", model_name, sizeof(model_name))) {
         
@@ -552,11 +606,12 @@ void PerformScan() {
     get(cyc_dpi, MUIA_Cycle_Active, &dpi_idx);
     
     const char *url_str = (const char *)ip_ptr;
+    const char *scan_url = scanner_url_effective[0] ? scanner_url_effective : url_str;
     int dpi = (dpi_idx == 0) ? 100 : 300;
 
     char host[128];
     int port, use_ssl;
-    parse_scanner_url(url_str, host, sizeof(host), &port, &use_ssl);
+    parse_scanner_url(scan_url, host, sizeof(host), &port, &use_ssl);
 
     set(txt_status, MUIA_Text_Contents, (IPTR)"Starting scan task...");
     
@@ -573,7 +628,7 @@ void PerformScan() {
         "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>\r\n"
         "</scan:ScanSettings>\r\n", dpi, dpi);
 
-    SecureConnection *sec = sec_connect(url_str);
+    SecureConnection *sec = sec_connect(scan_url);
     if (!sec && use_ssl) {
         // The Epson server also answers plaintext HTTP on port 443.
         char plain_url[160];
@@ -609,6 +664,10 @@ void PerformScan() {
         total += n;
     }
     sec_close(sec);
+    if (n < 0) {
+        set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Connection read failed during ScanJobs.");
+        return;
+    }
 
     char *loc = strstr(buf, "Location:");
     if (!loc) loc = strstr(buf, "location:");
@@ -631,13 +690,14 @@ void PerformScan() {
             strncpy(path, loc, sizeof(path) - 1);
         }
 
+        if (path[0] == '\0') strncpy(path, "/", sizeof(path) - 1);
         if (path[strlen(path)-1] != '/') strcat(path, "/");
         strcat(path, "NextDocument");
 
         set(txt_status, MUIA_Text_Contents, (IPTR)"Scanning... (waiting for file)");
         sleep(3);
 
-        SecureConnection *sec2 = sec_connect(url_str);
+        SecureConnection *sec2 = sec_connect(scan_url);
         if (!sec2 && use_ssl) {
             char plain_url[160];
             snprintf(plain_url, sizeof(plain_url), "http://%s:%d", host, port);
@@ -661,6 +721,8 @@ void PerformScan() {
             if (fp) {
                 char c;
                 int state = 0;
+                int body_bytes = 0;
+                int read_err = 0;
                 while (sec_recv(sec2, &c, 1) == 1) {
                     if (c == '\r' && (state == 0 || state == 2)) state++;
                     else if (c == '\n' && state == 1) state++;
@@ -672,10 +734,18 @@ void PerformScan() {
                     char chunk[4096];
                     while ((n = sec_recv(sec2, chunk, sizeof(chunk))) > 0) {
                         fwrite(chunk, 1, n, fp);
+                        body_bytes += n;
                     }
+                    if (n < 0) read_err = 1;
                 }
                 fclose(fp);
-                set(txt_status, MUIA_Text_Contents, (IPTR)"Done! Saved as RAM:scan.jpg");
+                if (read_err) {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Connection read failed during download.");
+                } else if (state == 4 && body_bytes > 0) {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Done! Saved as RAM:scan.jpg");
+                } else {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Error: No image data returned by scanner.");
+                }
             } else {
                 set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Cannot create file in RAM:");
             }
