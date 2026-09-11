@@ -37,7 +37,6 @@
 struct Library *MUIMasterBase = NULL;
 struct Library *SocketBase = NULL;
 Object *app, *window, *str_ip, *txt_status, *cyc_dpi, *btn_conn, *btn_scan;
-static char scanner_url_effective[160] = {0};
 
 #define ID_QUIT     1
 #define ID_CONNECT  2
@@ -383,11 +382,22 @@ int sec_recv(SecureConnection *sec, void *buf, size_t len) {
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (time(NULL) - start >= NET_TIMEOUT_SEC) {
+        time_t elapsed = time(NULL) - start;
+        if (elapsed >= NET_TIMEOUT_SEC) {
             net_timeout_hit = 1;
             return -1;
         }
-        Delay(10);
+        int wait_sec = (int)(NET_TIMEOUT_SEC - elapsed);
+        if (wait_sec > 1) wait_sec = 1;
+        if (wait_sec < 1) wait_sec = 1;
+        fd_set rfds;
+        struct timeval tv;
+        FD_ZERO(&rfds);
+        FD_SET(sec->sock, &rfds);
+        tv.tv_sec = wait_sec;
+        tv.tv_usec = 0;
+        int s = select(sec->sock + 1, &rfds, NULL, NULL, &tv);
+        if (s < 0 && errno != EINTR) return -1;
     }
 }
 
@@ -544,12 +554,13 @@ void CheckScannerCapabilities() {
     const char *url_str = (const char *)ip_ptr;
 
     if (!url_str || strlen(url_str) == 0) return;
-    scanner_url_effective[0] = '\0';
-
     set(txt_status, MUIA_Text_Contents, (IPTR)"Searching for scanner (HTTP/HTTPS)...");
 
     char buf[65536] = {0}; 
     int total = fetch_eSCL_capabilities(url_str, buf, sizeof(buf));
+    char effective_url[160];
+    strncpy(effective_url, url_str, sizeof(effective_url) - 1);
+    effective_url[sizeof(effective_url) - 1] = '\0';
 
     if ((total <= 0) && strncasecmp(url_str, "https", 5) == 0) {
         char host[128]; int port, use_ssl;
@@ -562,8 +573,9 @@ void CheckScannerCapabilities() {
         set(txt_status, MUIA_Text_Contents, (IPTR)"TLS handshake failed, retrying plain HTTP...");
         total = fetch_eSCL_capabilities(fallback, buf, sizeof(buf));
         if (total > 0) {
-            strncpy(scanner_url_effective, fallback, sizeof(scanner_url_effective) - 1);
-            scanner_url_effective[sizeof(scanner_url_effective) - 1] = '\0';
+            strncpy(effective_url, fallback, sizeof(effective_url) - 1);
+            effective_url[sizeof(effective_url) - 1] = '\0';
+            set(str_ip, MUIA_String_Contents, (IPTR)effective_url);
             set(txt_status, MUIA_Text_Contents, (IPTR)"Connected via plain HTTP on TLS port (TLS failed).");
         }
     }
@@ -588,15 +600,9 @@ void CheckScannerCapabilities() {
         }
     }
 
-    if (total > 0 && scanner_url_effective[0] == '\0') {
-        strncpy(scanner_url_effective, url_str, sizeof(scanner_url_effective) - 1);
-        scanner_url_effective[sizeof(scanner_url_effective) - 1] = '\0';
-    }
-
     char model_name[128] = {0};
     char host[128]; int port, use_ssl = 0;
-    parse_scanner_url(scanner_url_effective[0] ? scanner_url_effective : url_str,
-                      host, sizeof(host), &port, &use_ssl);
+    parse_scanner_url(effective_url, host, sizeof(host), &port, &use_ssl);
     if (get_xml_tag_value(buf, "MakeAndModel", model_name, sizeof(model_name)) ||
         get_xml_tag_value(buf, "Model", model_name, sizeof(model_name))) {
         
@@ -622,7 +628,7 @@ void PerformScan() {
     get(cyc_dpi, MUIA_Cycle_Active, &dpi_idx);
     
     const char *url_str = (const char *)ip_ptr;
-    const char *scan_url = scanner_url_effective[0] ? scanner_url_effective : url_str;
+    const char *scan_url = url_str;
     int dpi = (dpi_idx == 0) ? 100 : 300;
 
     char host[128];
