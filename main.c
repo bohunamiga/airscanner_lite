@@ -397,6 +397,13 @@ int sec_recv(SecureConnection *sec, void *buf, size_t len) {
         tv.tv_sec = wait_sec;
         tv.tv_usec = 0;
         int s = select(sec->sock + 1, &rfds, NULL, NULL, &tv);
+        if (s == 0) {
+            if (time(NULL) - start >= NET_TIMEOUT_SEC) {
+                net_timeout_hit = 1;
+                return -1;
+            }
+            continue;
+        }
         if (s < 0 && errno != EINTR) return -1;
     }
 }
@@ -628,7 +635,10 @@ void PerformScan() {
     get(cyc_dpi, MUIA_Cycle_Active, &dpi_idx);
     
     const char *url_str = (const char *)ip_ptr;
-    const char *scan_url = url_str;
+    char scan_url_buf[160];
+    strncpy(scan_url_buf, url_str ? url_str : "", sizeof(scan_url_buf) - 1);
+    scan_url_buf[sizeof(scan_url_buf) - 1] = '\0';
+    const char *scan_url = scan_url_buf;
     int dpi = (dpi_idx == 0) ? 100 : 300;
 
     char host[128];
@@ -656,6 +666,13 @@ void PerformScan() {
         char plain_url[160];
         snprintf(plain_url, sizeof(plain_url), "http://%s:%d", host, port);
         sec = sec_connect(plain_url);
+        if (sec) {
+            strncpy(scan_url_buf, plain_url, sizeof(scan_url_buf) - 1);
+            scan_url_buf[sizeof(scan_url_buf) - 1] = '\0';
+            scan_url = scan_url_buf;
+            set(str_ip, MUIA_String_Contents, (IPTR)scan_url);
+            parse_scanner_url(scan_url, host, sizeof(host), &port, &use_ssl);
+        }
     }
     if (!sec) {
         set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Cannot connect to scanner.");
@@ -745,6 +762,13 @@ void PerformScan() {
             char plain_url[160];
             snprintf(plain_url, sizeof(plain_url), "http://%s:%d", host, port);
             sec2 = sec_connect(plain_url);
+            if (sec2) {
+                strncpy(scan_url_buf, plain_url, sizeof(scan_url_buf) - 1);
+                scan_url_buf[sizeof(scan_url_buf) - 1] = '\0';
+                scan_url = scan_url_buf;
+                set(str_ip, MUIA_String_Contents, (IPTR)scan_url);
+                parse_scanner_url(scan_url, host, sizeof(host), &port, &use_ssl);
+            }
         }
         if (sec2) {
             snprintf(request, sizeof(request), 
