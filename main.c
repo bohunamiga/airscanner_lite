@@ -690,9 +690,30 @@ void PerformScan() {
             strncpy(path, loc, sizeof(path) - 1);
         }
 
-        if (path[0] == '\0') strncpy(path, "/", sizeof(path) - 1);
-        if (path[strlen(path)-1] != '/') strcat(path, "/");
-        strcat(path, "NextDocument");
+        {
+            const char *suffix = "NextDocument";
+            size_t plen = strlen(path);
+            size_t slen = strlen(suffix);
+            if (plen == 0) {
+                if (snprintf(path, sizeof(path), "/%s", suffix) >= (int)sizeof(path)) {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Scanner path too long.");
+                    return;
+                }
+            } else if (path[plen - 1] == '/') {
+                if (plen + slen >= sizeof(path)) {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Scanner path too long.");
+                    return;
+                }
+                strncat(path, suffix, sizeof(path) - strlen(path) - 1);
+            } else {
+                if (plen + 1 + slen >= sizeof(path)) {
+                    set(txt_status, MUIA_Text_Contents, (IPTR)"Error: Scanner path too long.");
+                    return;
+                }
+                strncat(path, "/", sizeof(path) - strlen(path) - 1);
+                strncat(path, suffix, sizeof(path) - strlen(path) - 1);
+            }
+        }
 
         set(txt_status, MUIA_Text_Contents, (IPTR)"Scanning... (waiting for file)");
         sleep(3);
