@@ -145,8 +145,9 @@ static int sock_write(void *ctx, const unsigned char *buf, size_t len) {
         FD_SET(fd, &wfds);
         tv.tv_sec = wait_sec;
         tv.tv_usec = 0;
-        if (select(fd + 1, NULL, &wfds, NULL, &tv) < 0) {
-            net_timeout_hit = 1;
+        int s = select(fd + 1, NULL, &wfds, NULL, &tv);
+        if (s < 0) {
+            if (errno == EINTR) continue;
             return -1;
         }
     }
@@ -358,8 +359,9 @@ int sec_send(SecureConnection *sec, const void *buf, size_t len) {
         FD_SET(sec->sock, &wfds);
         tv.tv_sec = wait_sec;
         tv.tv_usec = 0;
-        if (select(sec->sock + 1, NULL, &wfds, NULL, &tv) < 0) {
-            net_timeout_hit = 1;
+        int s = select(sec->sock + 1, NULL, &wfds, NULL, &tv);
+        if (s < 0) {
+            if (errno == EINTR) continue;
             return -1;
         }
     }
